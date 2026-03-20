@@ -1,350 +1,267 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { C, DEMO_EVENTS, mapSeverity } from './constants.js'
-import LoginPage from './components/LoginPage.jsx'
-import DashboardPage from './components/DashboardPage.jsx'
-import DetailModal from './components/DetailModal.jsx'
-import SettingsPage from './components/SettingsPage.jsx'
+import { useState } from 'react'
+import { C } from '../constants.js'
 
-const GLOBAL_CSS = `
-  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-  body { background:#0a1628; }
-  @keyframes sl-spin { to { transform:rotate(360deg) } }
-  @keyframes sl-fadein { from { opacity:0; transform:translateY(4px) } to { opacity:1; transform:none } }
-  @keyframes sl-slideup { from { transform:translateY(100%) } to { transform:translateY(0) } }
-  ::-webkit-scrollbar { display:none }
-  input, textarea, button { font-family:inherit; }
-  input::placeholder, textarea::placeholder { color:#8a9bb5; }
+const ANIM = `
+@keyframes sl-spin { to { transform: rotate(360deg) } }
+@keyframes sl-fadein { from { opacity:0; transform:translateY(6px) } to { opacity:1; transform:none } }
 `
 
-function Spinner({ size=36, border=3 }) {
-  return <div style={{ width:size, height:size, border:`${border}px solid ${C.border}`, borderTopColor:C.blue, borderRadius:'50%', animation:'sl-spin 0.8s linear infinite' }} />
-}
+const AUTH_METHODS = [
+  { id: 'basic',  label: 'Username & Password', icon: '🔑', desc: 'Direct Basic Auth to EM7 API' },
+  { id: 'token',  label: 'API Token',           icon: '🪙', desc: 'Personal API token from EM7 profile' },
+  { id: 'oidc',   label: 'OAuth2 / OpenID Connect', icon: '🔐', desc: 'Azure AD, Okta, Google, Keycloak' },
+  { id: 'saml',   label: 'SAML 2.0',           icon: '🏢', desc: 'Azure AD, ADFS, Okta SAML' },
+]
 
-function Toast({ msg, type, visible }) {
-  return (
-    <div style={{ position:'fixed', bottom:76, left:16, right:16, background:'#1d2d44', border:`1px solid ${C.border}`, borderRadius:12, padding:'12px 16px', fontSize:14, color:C.text, zIndex:200, transform:visible?'translateY(0)':'translateY(16px)', opacity:visible?1:0, transition:'all 0.3s cubic-bezier(0.22,1,0.36,1)', display:'flex', alignItems:'center', gap:8, pointerEvents:'none' }}>
-      <span style={{ color:type==='success'?C.healthy:C.critical, fontWeight:700 }}>{type==='success'?'✓':'✕'}</span>
-      {msg}
-    </div>
-  )
-}
-
-// Handle OAuth2 callback (code in URL params)
-function extractOidcCallback() {
-  const params = new URLSearchParams(window.location.search)
-  const code = params.get('code')
-  const state = params.get('state')
-  if (!code) return null
-  const savedState = sessionStorage.getItem('sl_oidc_state')
-  if (state !== savedState) return null
+function inp(extra={}) {
   return {
-    code,
-    host: sessionStorage.getItem('sl_oidc_host'),
-    clientId: sessionStorage.getItem('sl_oidc_client_id'),
-    tokenUrl: sessionStorage.getItem('sl_oidc_token_url'),
-    verifier: sessionStorage.getItem('sl_oidc_verifier'),
+    background: C.navyLight, border: `1px solid ${C.border}`, borderRadius: 10,
+    color: C.text, fontSize: 16, padding: '0 14px', height: 48,
+    outline: 'none', width: '100%', fontFamily: 'inherit', ...extra
   }
 }
 
-export default function App() {
-  const [screen, setScreen] = useState('login')
-  const [tab, setTab] = useState('dashboard')
-  const [creds, setCreds] = useState(null)
-  const [events, setEvents] = useState([])
-  const [filter, setFilter] = useState('all')
-  const [bulkMode, setBulkMode] = useState(false)
-  const [selectedIds, setSelectedIds] = useState(new Set())
-  const [modalEvent, setModalEvent] = useState(null)
+function Label({ children }) {
+  return <div style={{ fontSize:12, fontWeight:600, color:C.textMuted, textTransform:'uppercase', letterSpacing:'0.6px', marginBottom:6 }}>{children}</div>
+}
+
+function Field({ label, children }) {
+  return <div style={{ display:'flex', flexDirection:'column' }}><Label>{label}</Label>{children}</div>
+}
+
+export default function LoginPage({ onLogin }) {
+  const [host, setHost] = useState('')
+  const [method, setMethod] = useState('basic')
+  const [user, setUser] = useState('')
+  const [pass, setPass] = useState('')
+  const [showPass, setShowPass] = useState(false)
+  const [token, setToken] = useState('')
+  // OIDC fields
+  const [oidcClientId, setOidcClientId] = useState('')
+  const [oidcAuthUrl, setOidcAuthUrl] = useState('')
+  const [oidcTokenUrl, setOidcTokenUrl] = useState('')
+  const [oidcRedirect, setOidcRedirect] = useState(window.location.origin + window.location.pathname)
+  // SAML fields
+  const [samlIdpUrl, setSamlIdpUrl] = useState('')
+  const [samlEntityId, setSamlEntityId] = useState('')
+
+  const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const [refreshing, setRefreshing] = useState(false)
-  const [lastRefresh, setLastRefresh] = useState('')
-  const [toast, setToast] = useState({ msg:'', type:'success', visible:false })
-  const [notifPerm, setNotifPerm] = useState('default')
-  const [showNotifBanner, setShowNotifBanner] = useState(false)
-  const knownCriticals = useRef(new Set())
-  const refreshTimer = useRef(null)
 
-  const showToast = useCallback((msg, type='success') => {
-    setToast({ msg, type, visible:true })
-    setTimeout(() => setToast(t => ({...t, visible:false})), 3000)
-  }, [])
+  const doLogin = async () => {
+    setError('')
 
-  // Check OIDC callback on mount
-  useEffect(() => {
-    const cb = extractOidcCallback()
-    if (cb && cb.host) {
-      // Clean URL
-      window.history.replaceState({}, '', window.location.pathname)
-      sessionStorage.removeItem('sl_oidc_state')
-      // Exchange code for token if token URL provided
-      if (cb.tokenUrl) {
-        exchangeOidcCode(cb)
-      } else {
-        // Just use the code directly as bearer token (non-standard but some EM7 setups)
-        enterApp({ host:cb.host, user:'sso-user', pass:'', token:cb.code, method:'oidc', demoMode:false })
-      }
+    // Demo mode
+    if (!host && !user && !pass && !token) {
+      onLogin({ host:'demo.sciencelogic.local', user:'demo_admin', pass:'', token:'', method:'basic', demoMode:true })
+      return
     }
-  }, [])
 
-  const exchangeOidcCode = async (cb) => {
+    if (!host) { setError('Please enter an API host.'); return }
+
+    const cleanHost = host.replace(/\/$/, '')
+
+    if (method === 'saml') {
+      if (!samlIdpUrl) { setError('Please enter the SAML IdP SSO URL.'); return }
+      // Redirect to SAML IdP — build AuthnRequest redirect
+      const relayState = encodeURIComponent(JSON.stringify({ host: cleanHost, ts: Date.now() }))
+      const spEntityId = encodeURIComponent(samlEntityId || window.location.origin)
+      const acsUrl = encodeURIComponent(oidcRedirect)
+      // Store pending login in sessionStorage for the callback
+      sessionStorage.setItem('sl_saml_host', cleanHost)
+      sessionStorage.setItem('sl_saml_pending', '1')
+      window.location.href = `${samlIdpUrl}?SAMLRequest=PLACEHOLDER&RelayState=${relayState}&SPEntityId=${spEntityId}&AssertionConsumerServiceURL=${acsUrl}`
+      return
+    }
+
+    if (method === 'oidc') {
+      if (!oidcClientId) { setError('Please enter a Client ID.'); return }
+      if (!oidcAuthUrl) { setError('Please enter the Authorization URL.'); return }
+      // Store for callback
+      sessionStorage.setItem('sl_oidc_host', cleanHost)
+      sessionStorage.setItem('sl_oidc_client_id', oidcClientId)
+      sessionStorage.setItem('sl_oidc_token_url', oidcTokenUrl)
+      const state = Math.random().toString(36).slice(2)
+      const codeVerifier = Math.random().toString(36).repeat(3).slice(0, 43)
+      sessionStorage.setItem('sl_oidc_state', state)
+      sessionStorage.setItem('sl_oidc_verifier', codeVerifier)
+      const params = new URLSearchParams({
+        response_type: 'code',
+        client_id: oidcClientId,
+        redirect_uri: oidcRedirect,
+        scope: 'openid profile email',
+        state,
+        code_challenge_method: 'plain',
+        code_challenge: codeVerifier,
+      })
+      window.location.href = `${oidcAuthUrl}?${params}`
+      return
+    }
+
+    // Proxy URL — same as in App.jsx
+    const PROXY_URL = 'https://sl-em7-proxy.richard-hamstra.workers.dev'
+
+    if (method === 'token') {
+      if (!token) { setError('Please enter an API token.'); return }
+      setLoading(true)
+      try {
+        const resp = await fetch(PROXY_URL + '/api/?limit=1', {
+          headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json', 'X-EM7-Target': cleanHost },
+          signal: AbortSignal.timeout(10000)
+        })
+        if (resp.status === 401 || resp.status === 403) throw new Error('Invalid token.')
+        if (!resp.ok) throw new Error('API error: HTTP ' + resp.status)
+        onLogin({ host: cleanHost, user: 'api-token-user', pass: '', token, method: 'token', demoMode: false })
+      } catch(e) {
+        let msg = e.message
+        if (e.name === 'TimeoutError') msg = 'Connection timed out.'
+        else if (msg.includes('fetch') || msg.includes('Network')) msg = 'Could not connect. Check CORS/HTTPS settings.'
+        setError(msg)
+        setLoading(false)
+      }
+      return
+    }
+
+    // Basic auth
+    if (!user) { setError('Please enter a username.'); return }
+    if (!pass) { setError('Please enter a password.'); return }
     setLoading(true)
     try {
-      const body = new URLSearchParams({
-        grant_type: 'authorization_code',
-        code: cb.code,
-        client_id: cb.clientId,
-        redirect_uri: window.location.origin + window.location.pathname,
-        code_verifier: cb.verifier,
+      const credentials = btoa(user + ':' + pass)
+      const resp = await fetch(PROXY_URL + '/api/?limit=1', {
+        headers: { 'Authorization': 'Basic ' + credentials, 'Accept': 'application/json', 'X-EM7-Target': cleanHost },
+        signal: AbortSignal.timeout(10000)
       })
-      const resp = await fetch(cb.tokenUrl, { method:'POST', body, headers:{ 'Content-Type':'application/x-www-form-urlencoded' } })
-      if (!resp.ok) throw new Error('Token exchange failed: HTTP ' + resp.status)
-      const data = await resp.json()
-      const token = data.access_token
-      if (!token) throw new Error('Geen access_token ontvangen')
-      enterApp({ host:cb.host, user: data.preferred_username || 'sso-user', pass:'', token, method:'oidc', demoMode:false })
+      if (resp.status === 401 || resp.status === 403) throw new Error('Invalid credentials.')
+      if (!resp.ok) throw new Error('API error: HTTP ' + resp.status)
+      onLogin({ host: cleanHost, user, pass, token: '', method: 'basic', demoMode: false })
     } catch(e) {
+      let msg = e.message
+      if (e.name === 'TimeoutError') msg = 'Connection time-out.'
+      else if (msg.includes('fetch') || msg.includes('Network')) msg = 'Could not connect. Check CORS/HTTPS settings.'
+      setError(msg)
       setLoading(false)
-      showToast('SSO failed: ' + e.message, 'error')
     }
   }
 
-  // Cloudflare Worker proxy — set this to your worker URL after deployment
-  const PROXY_URL = 'https://sl-em7-proxy.richard-hamstra.workers.dev'
-
-  const apiHeaders = useCallback((c=creds) => {
-    if (!c) return {}
-    const auth = (c.method === 'token' || c.method === 'oidc')
-      ? { 'Authorization':'Bearer '+c.token }
-      : { 'Authorization':'Basic '+btoa(c.user+':'+c.pass) }
-    return {
-      ...auth,
-      'Accept': 'application/json',
-      'X-em7-beautify-response': '1',
-      'X-EM7-Target': c.host,  // tells the proxy which EM7 instance to forward to
-    }
-  }, [creds])
-
-  const apiUrl = useCallback((path, c=creds) => {
-    if (!c || c.demoMode) return path
-    return PROXY_URL + path
-  }, [creds])
-
-  const loadEvents = useCallback(async (c=creds) => {
-    if (!c) return
-    setRefreshing(true)
-
-    if (c.demoMode) {
-      await new Promise(r => setTimeout(r, 600))
-      setEvents(prev => {
-        const fresh = JSON.parse(JSON.stringify(DEMO_EVENTS))
-        fresh.forEach(e => { const ex=prev.find(x=>x.id===e.id); if(ex?.acknowledged){e.acknowledged=true;e.ackUser=ex.ackUser;e.ackNote=ex.ackNote} })
-        if (Notification.permission==='granted') {
-          fresh.filter(e=>e.severity==='critical'&&!e.acknowledged&&!knownCriticals.current.has(e.id)).forEach(e=>{
-            knownCriticals.current.add(e.id)
-            try { const n=new Notification('⚠ Critical — ScienceLogic',{body:e.device+': '+e.message,tag:e.id}); setTimeout(()=>n.close(),8000) } catch{}
-          })
-        }
-        return fresh
-      })
-      setLastRefresh('Updated at '+new Date().toLocaleTimeString('nl-NL',{hour:'2-digit',minute:'2-digit'}))
-      setRefreshing(false)
-      return
-    }
-
-    try {
-      const resp = await fetch(apiUrl('/api/event_policy?filter.0.severity.gte=3&limit=100&extended_fetch=1', c), { headers:apiHeaders(c), signal:AbortSignal.timeout(15000) })
-      if (!resp.ok) throw new Error('HTTP '+resp.status)
-      const data = await resp.json()
-      const mapped = (data.result_set||[]).map((e,i) => ({
-        id: e.URI||('e'+i), severity:mapSeverity(e.severity||e.event_severity),
-        message: e.message||e.event_message||'Geen beschrijving',
-        device: e.device_name||e.aligned_device||'Onbekend', ip:e.ip||'', component:e.component||'',
-        time: '', firstOccurrence:e.date_first||'', lastOccurrence:e.last_occurrence||'',
-        count: parseInt(e.occurrence_count||1),
-        acknowledged: e.ack==='1'||e.acknowledged===true,
-        ackUser:e.ack_user||'', ackNote:e.ack_note||'', policy:e.policy_name||'', organization:e.organization||''
-      }))
-      if (Notification.permission==='granted') {
-        mapped.filter(e=>e.severity==='critical'&&!e.acknowledged&&!knownCriticals.current.has(e.id)).forEach(e=>{
-          knownCriticals.current.add(e.id)
-          try { const n=new Notification('⚠ Critical — ScienceLogic',{body:e.device+': '+e.message,tag:e.id}); setTimeout(()=>n.close(),8000) } catch{}
-        })
-      }
-      setEvents(mapped)
-      setLastRefresh('Updated at '+new Date().toLocaleTimeString('nl-NL',{hour:'2-digit',minute:'2-digit'}))
-    } catch(e) { showToast('Refresh failed: '+e.message, 'error') }
-    setRefreshing(false)
-  }, [creds, apiHeaders, showToast])
-
-  const enterApp = useCallback((c) => {
-    setCreds(c)
-    setScreen('loading')
-    setTimeout(() => {
-      setScreen('app')
-      loadEvents(c)
-      refreshTimer.current = setInterval(() => loadEvents(c), 60000)
-      if ('Notification' in window) {
-        setNotifPerm(Notification.permission)
-        if (Notification.permission==='default') setTimeout(()=>setShowNotifBanner(true), 2000)
-      }
-    }, 800)
-  }, [loadEvents])
-
-  const doLogout = () => {
-    clearInterval(refreshTimer.current)
-    setCreds(null); setEvents([]); setScreen('login'); setTab('dashboard')
-    setBulkMode(false); setSelectedIds(new Set()); knownCriticals.current=new Set()
-    setFilter('all'); setLastRefresh('')
-  }
-
-  const requestNotif = async () => {
-    if (!('Notification' in window)) { showToast('Not supported in this browser','error'); return }
-    if (Notification.permission==='denied') { showToast('Blocked — change in browser settings','error'); return }
-    const r = await Notification.requestPermission()
-    setNotifPerm(r); setShowNotifBanner(false)
-    if (r==='granted') showToast('Notifications enabled!')
-  }
-
-  const ackEvent = useCallback(async (id, note='') => {
-    if (creds?.demoMode) {
-      await new Promise(r=>setTimeout(r,500))
-      setEvents(prev=>prev.map(e=>e.id===id?{...e,acknowledged:true,ackUser:'demo_admin',ackNote:note}:e))
-      showToast('Event acknowledged')
-      return
-    }
-    try {
-      const resp = await fetch(apiUrl('/api/event/'+id+'/acknowledge'), { method:'POST', headers:{...apiHeaders(),'Content-Type':'application/json'}, body:JSON.stringify({ack:1,note}) })
-      if (!resp.ok) throw new Error('HTTP '+resp.status)
-      setEvents(prev=>prev.map(e=>e.id===id?{...e,acknowledged:true,ackUser:creds.user,ackNote:note}:e))
-      showToast('Event acknowledged')
-    } catch(e) { showToast('Acknowledge failed: '+e.message,'error') }
-  }, [creds, apiHeaders, showToast])
-
-  const bulkAck = async () => {
-    const ids = [...selectedIds]; let ok=0, fail=0
-    for (const id of ids) {
-      try {
-        if (creds?.demoMode) { await new Promise(r=>setTimeout(r,60)); setEvents(prev=>prev.map(e=>e.id===id?{...e,acknowledged:true,ackUser:'demo_admin'}:e)); ok++ }
-        else {
-          const resp=await fetch(apiUrl('/api/event/'+id+'/acknowledge'),{method:'POST',headers:{...apiHeaders(),'Content-Type':'application/json'},body:JSON.stringify({ack:1})})
-          if(!resp.ok) throw new Error(); setEvents(prev=>prev.map(e=>e.id===id?{...e,acknowledged:true,ackUser:creds.user}:e)); ok++
-        }
-      } catch { fail++ }
-    }
-    setBulkMode(false); setSelectedIds(new Set())
-    if(fail===0) showToast(`✓ ${ok} event${ok!==1?'s':''} acknowledged`)
-    else showToast(`${ok} succeeded, ${fail} failed`,'error')
-  }
-
-  const filtered = events.filter(e => {
-    if (filter==='all') return !e.acknowledged
-    if (filter==='acked') return e.acknowledged
-    if (['critical','major','minor'].includes(filter)) return e.severity===filter&&!e.acknowledged
-    return true
-  })
-
-  const counts = {
-    critical: events.filter(e=>e.severity==='critical'&&!e.acknowledged).length,
-    major: events.filter(e=>e.severity==='major'&&!e.acknowledged).length,
-    minor: events.filter(e=>e.severity==='minor'&&!e.acknowledged).length,
-    acked: events.filter(e=>e.acknowledged).length,
-  }
-
-  const onSelectAll = () => {
-    const eligible = filtered.filter(e=>!e.acknowledged)
-    const allSel = eligible.every(e=>selectedIds.has(e.id))
-    setSelectedIds(allSel ? new Set() : new Set(eligible.map(e=>e.id)))
-  }
-
-  const baseStyle = { fontFamily:"-apple-system,'SF Pro Display','Segoe UI',Roboto,sans-serif", background:C.navy, color:C.text, height:'100dvh', display:'flex', flexDirection:'column', overflow:'hidden', position:'relative' }
-
-  if (screen==='login') return (
-    <div style={baseStyle}>
-      <style>{GLOBAL_CSS}</style>
-      <div style={{ flex:1, overflowY:'auto', WebkitAboutflowScrolling:'touch' }}>
-        <LoginPage onLogin={enterApp} />
-      </div>
-    </div>
-  )
-
-  if (screen==='loading') return (
-    <div style={{...baseStyle, alignItems:'center', justifyContent:'center', gap:16}}>
-      <style>{GLOBAL_CSS}</style>
-      <div style={{ width:56, height:56, background:'linear-gradient(135deg,#1a6fc4,#00b4d8)', borderRadius:16, display:'flex', alignItems:'center', justifyContent:'center', fontWeight:900, fontSize:20, color:'white', letterSpacing:-1 }}>SL</div>
-      <Spinner />
-      <div style={{ fontSize:14, color:C.textMuted }}>Connecting...</div>
-    </div>
-  )
+  const selected = AUTH_METHODS.find(m => m.id === method)
 
   return (
-    <div style={baseStyle}>
-      <style>{GLOBAL_CSS}</style>
+    <div style={{ minHeight:'100%', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:'32px 20px' }}>
+      <style>{ANIM}</style>
 
-      {/* Header */}
-      <div style={{ height:56, background:C.navyMid, borderBottom:`1px solid ${C.border}`, display:'flex', alignItems:'center', padding:'0 16px', gap:12, flexShrink:0 }}>
-        <div style={{ width:32, height:32, background:'linear-gradient(135deg,#1a6fc4,#00b4d8)', borderRadius:8, display:'flex', alignItems:'center', justifyContent:'center', fontWeight:800, fontSize:13, color:'white', letterSpacing:'-0.5px', flexShrink:0 }}>SL</div>
+      {/* Logo */}
+      <div style={{ marginBottom:36, textAlign:'center' }}>
+        <div style={{ width:72, height:72, background:'linear-gradient(135deg,#1a6fc4,#00b4d8)', borderRadius:20, display:'flex', alignItems:'center', justifyContent:'center', fontWeight:900, fontSize:26, color:'white', margin:'0 auto 14px', letterSpacing:-1, boxShadow:'0 12px 40px rgba(26,111,196,0.4)' }}>SL</div>
+        <div style={{ fontSize:22, fontWeight:700, color:C.text }}>ScienceLogic EM7</div>
+        <div style={{ fontSize:13, color:C.textMuted, marginTop:4 }}>Event Management Platform</div>
+      </div>
+
+      <div style={{ width:'100%', maxWidth:380, display:'flex', flexDirection:'column', gap:16 }}>
+
+        {/* Host */}
+        <Field label="API Host">
+          <input style={inp()} type="url" placeholder="https://your-instance.sciencelogic.com"
+            value={host} onChange={e=>setHost(e.target.value)} onKeyDown={e=>e.key==='Enter'&&doLogin()} />
+        </Field>
+
+        {/* Auth method picker */}
         <div>
-          <div style={{ fontSize:17, fontWeight:600, color:C.text, letterSpacing:'-0.3px' }}>ScienceLogic</div>
-          <div style={{ fontSize:11, color:C.textMuted }}>{creds?.demoMode ? 'Demo mode' : creds?.host?.replace('https://','')}</div>
-        </div>
-        <div style={{ marginLeft:'auto', display:'flex', alignItems:'center', gap:6 }}>
-          <div style={{ width:8, height:8, borderRadius:'50%', background:C.healthy, boxShadow:`0 0 0 3px ${C.healthy}33` }} />
-        </div>
-      </div>
-      <div style={{ height:2, background:'linear-gradient(90deg,#1a6fc4,#00b4d8,transparent)', flexShrink:0 }} />
-
-      {/* Content */}
-      <div style={{ flex:1, overflowY:'auto', overflowX:'hidden', WebkitAboutflowScrolling:'touch', paddingBottom:64 }}>
-        {tab==='dashboard' && (
-          <DashboardPage
-            events={events} filtered={filtered} counts={counts}
-            filter={filter} setFilter={setFilter}
-            bulkMode={bulkMode} setBulkMode={setBulkMode}
-            selectedIds={selectedIds} setSelectedIds={setSelectedIds}
-            refreshing={refreshing} lastRefresh={lastRefresh}
-            onRefresh={()=>loadEvents()}
-            onCardClick={id => {
-              if (bulkMode) {
-                const ev = events.find(e=>e.id===id)
-                if (!ev||ev.acknowledged) return
-                setSelectedIds(prev=>{ const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n })
-              } else {
-                setModalEvent(events.find(e=>e.id===id))
-              }
-            }}
-            onQuickAck={id=>ackEvent(id)}
-            showNotifBanner={showNotifBanner} notifPerm={notifPerm}
-            onRequestNotif={requestNotif} onDismissNotifBanner={()=>setShowNotifBanner(false)}
-            onSelectAll={onSelectAll} onBulkAck={bulkAck}
-          />
-        )}
-        {tab==='settings' && (
-          <SettingsPage creds={creds} notifPerm={notifPerm} onRequestNotif={requestNotif} onLogout={doLogout} />
-        )}
-      </div>
-
-      {/* Tab bar */}
-      <div style={{ position:'fixed', bottom:0, left:0, right:0, height:64, background:C.navyMid, borderTop:`1px solid ${C.border}`, display:'flex', zIndex:50 }}>
-        {[['dashboard','Dashboard','▦'],['settings','Settings','⚙']].map(([t,l,icon])=>(
-          <div key={t} onClick={()=>setTab(t)} style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:4, cursor:'pointer', color:tab===t?C.blueBright:C.textMuted, paddingTop:6, position:'relative', WebkitTapHighlightColor:'transparent' }}>
-            <span style={{ fontSize:22 }}>{icon}</span>
-            <span style={{ fontSize:11, fontWeight:500 }}>{l}</span>
-            {t==='dashboard' && counts.critical>0 && (
-              <div style={{ position:'absolute', top:4, right:'calc(50% - 20px)', background:C.critical, color:'white', fontSize:10, fontWeight:700, minWidth:18, height:18, borderRadius:9, display:'flex', alignItems:'center', justifyContent:'center', padding:'0 4px' }}>{counts.critical}</div>
-            )}
+          <Label>Authentication method</Label>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
+            {AUTH_METHODS.map(m => (
+              <div key={m.id} onClick={()=>setMethod(m.id)} style={{ background: method===m.id ? 'rgba(26,111,196,0.2)' : C.card, border:`1px solid ${method===m.id ? 'rgba(26,111,196,0.5)' : C.border}`, borderRadius:10, padding:'10px 12px', cursor:'pointer', transition:'all 0.15s' }}>
+                <div style={{ fontSize:18, marginBottom:4 }}>{m.icon}</div>
+                <div style={{ fontSize:13, fontWeight:600, color: method===m.id ? C.blueBright : C.text, lineHeight:1.3 }}>{m.label}</div>
+                <div style={{ fontSize:11, color:C.textMuted, marginTop:2, lineHeight:1.3 }}>{m.desc}</div>
+              </div>
+            ))}
           </div>
-        ))}
+        </div>
+
+        {/* Basic auth fields */}
+        {method === 'basic' && <>
+          <Field label="Username">
+            <input style={inp()} type="text" placeholder="em7admin"
+              value={user} onChange={e=>setUser(e.target.value)} onKeyDown={e=>e.key==='Enter'&&doLogin()} />
+          </Field>
+          <Field label="Password">
+            <div style={{ position:'relative' }}>
+              <input style={inp({ paddingRight:44 })} type={showPass?'text':'password'} placeholder="••••••••"
+                value={pass} onChange={e=>setPass(e.target.value)} onKeyDown={e=>e.key==='Enter'&&doLogin()} />
+              <button onClick={()=>setShowPass(v=>!v)} style={{ position:'absolute', right:12, top:'50%', transform:'translateY(-50%)', background:'none', border:'none', color:C.textMuted, cursor:'pointer', fontSize:16 }}>{showPass?'🙈':'👁'}</button>
+            </div>
+          </Field>
+        </>}
+
+        {/* Token fields */}
+        {method === 'token' && <>
+          <Field label="API Token">
+            <input style={inp()} type="password" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              value={token} onChange={e=>setToken(e.target.value)} onKeyDown={e=>e.key==='Enter'&&doLogin()} />
+          </Field>
+          <div style={{ fontSize:12, color:C.textMuted, background:C.card, border:`1px solid ${C.border}`, borderRadius:8, padding:'10px 12px', lineHeight:1.6 }}>
+            📌 Generate an API token via <strong style={{color:C.text}}>EM7 → My Profile → API Tokens → New token</strong>
+          </div>
+        </>}
+
+        {/* OIDC fields */}
+        {method === 'oidc' && <>
+          <Field label="Client ID">
+            <input style={inp()} type="text" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              value={oidcClientId} onChange={e=>setOidcClientId(e.target.value)} />
+          </Field>
+          <Field label="Authorization URL">
+            <input style={inp()} type="url" placeholder="https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"
+              value={oidcAuthUrl} onChange={e=>setOidcAuthUrl(e.target.value)} />
+          </Field>
+          <Field label="Token URL (optional)">
+            <input style={inp()} type="url" placeholder="https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+              value={oidcTokenUrl} onChange={e=>setOidcTokenUrl(e.target.value)} />
+          </Field>
+          <Field label="Redirect URI">
+            <input style={inp()} type="url" value={oidcRedirect} onChange={e=>setOidcRedirect(e.target.value)} />
+          </Field>
+          <div style={{ fontSize:12, color:C.textMuted, background:C.card, border:`1px solid ${C.border}`, borderRadius:8, padding:'10px 12px', lineHeight:1.6 }}>
+            📌 Register <strong style={{color:C.text}}>{oidcRedirect}</strong> as Redirect URI in your identity provider.
+          </div>
+        </>}
+
+        {/* SAML fields */}
+        {method === 'saml' && <>
+          <Field label="IdP SSO URL">
+            <input style={inp()} type="url" placeholder="https://login.microsoftonline.com/{tenant}/saml2"
+              value={samlIdpUrl} onChange={e=>setSamlIdpUrl(e.target.value)} />
+          </Field>
+          <Field label="SP Entity ID (optional)">
+            <input style={inp()} type="text" placeholder={window.location.origin}
+              value={samlEntityId} onChange={e=>setSamlEntityId(e.target.value)} />
+          </Field>
+          <div style={{ fontSize:12, color:C.textMuted, background:'rgba(251,192,45,0.08)', border:'1px solid rgba(251,192,45,0.2)', borderRadius:8, padding:'10px 12px', lineHeight:1.6 }}>
+            ⚠️ SAML requires configuration on the IdP. Set the ACS URL to: <strong style={{color:C.text, wordBreak:'break-all'}}>{oidcRedirect}</strong>
+          </div>
+        </>}
+
+        {/* Error */}
+        {error && (
+          <div style={{ background:'rgba(229,57,53,0.15)', border:'1px solid rgba(229,57,53,0.3)', borderRadius:8, padding:'12px 14px', fontSize:13, color:'#ff6b6b' }}>{error}</div>
+        )}
+
+        {/* Demo note */}
+        <div style={{ background:'rgba(26,111,196,0.1)', border:'1px solid rgba(26,111,196,0.2)', borderRadius:8, padding:'10px 12px', fontSize:12, color:'rgba(33,150,243,0.9)', lineHeight:1.5 }}>
+          💡 <strong>Demo:</strong> Leave all fields empty and click Sign In for sample data.
+        </div>
+
+        {/* Login button */}
+        <button onClick={doLogin} disabled={loading} style={{ height:50, background:'linear-gradient(135deg,#1a6fc4,#1560a8)', border:'none', borderRadius:10, color:'white', fontSize:16, fontWeight:600, cursor:loading?'default':'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:8, boxShadow:'0 4px 20px rgba(26,111,196,0.35)', opacity:loading?0.7:1 }}>
+          {loading
+            ? <><div style={{ width:20, height:20, border:`2px solid rgba(255,255,255,0.3)`, borderTopColor:'white', borderRadius:'50%', animation:'sl-spin 0.8s linear infinite' }} /> Connecting...</>
+            : method==='oidc' || method==='saml'
+              ? <>{selected.icon} Continue to {method==='oidc'?'Identity Provider':'SAML IdP'}</>
+              : 'Sign In'
+          }
+        </button>
       </div>
-
-      {modalEvent && (
-        <DetailModal
-          event={events.find(e=>e.id===modalEvent.id)}
-          onClose={()=>setModalEvent(null)}
-          onAck={async(id,note)=>{ await ackEvent(id,note) }}
-        />
-      )}
-
-      <Toast msg={toast.msg} type={toast.type} visible={toast.visible} />
     </div>
   )
 }
