@@ -108,10 +108,25 @@ export default function App() {
     }
   }
 
+  // Cloudflare Worker proxy — set this to your worker URL after deployment
+  const PROXY_URL = 'https://sl-em7-proxy.richard-hamstra.workers.dev'
+
   const apiHeaders = useCallback((c=creds) => {
     if (!c) return {}
-    if (c.method === 'token' || c.method === 'oidc') return { 'Authorization':'Bearer '+c.token, 'Accept':'application/json', 'X-em7-beautify-response':'1' }
-    return { 'Authorization':'Basic '+btoa(c.user+':'+c.pass), 'Accept':'application/json', 'X-em7-beautify-response':'1' }
+    const auth = (c.method === 'token' || c.method === 'oidc')
+      ? { 'Authorization':'Bearer '+c.token }
+      : { 'Authorization':'Basic '+btoa(c.user+':'+c.pass) }
+    return {
+      ...auth,
+      'Accept': 'application/json',
+      'X-em7-beautify-response': '1',
+      'X-EM7-Target': c.host,  // tells the proxy which EM7 instance to forward to
+    }
+  }, [creds])
+
+  const apiUrl = useCallback((path, c=creds) => {
+    if (!c || c.demoMode) return path
+    return PROXY_URL + path
   }, [creds])
 
   const loadEvents = useCallback(async (c=creds) => {
@@ -137,7 +152,7 @@ export default function App() {
     }
 
     try {
-      const resp = await fetch(c.host+'/api/event_policy?filter.0.severity.gte=3&limit=100&extended_fetch=1', { headers:apiHeaders(c), signal:AbortSignal.timeout(15000) })
+      const resp = await fetch(apiUrl('/api/event_policy?filter.0.severity.gte=3&limit=100&extended_fetch=1', c), { headers:apiHeaders(c), signal:AbortSignal.timeout(15000) })
       if (!resp.ok) throw new Error('HTTP '+resp.status)
       const data = await resp.json()
       const mapped = (data.result_set||[]).map((e,i) => ({
@@ -198,7 +213,7 @@ export default function App() {
       return
     }
     try {
-      const resp = await fetch(creds.host+'/api/event/'+id+'/acknowledge', { method:'POST', headers:{...apiHeaders(),'Content-Type':'application/json'}, body:JSON.stringify({ack:1,note}) })
+      const resp = await fetch(apiUrl('/api/event/'+id+'/acknowledge'), { method:'POST', headers:{...apiHeaders(),'Content-Type':'application/json'}, body:JSON.stringify({ack:1,note}) })
       if (!resp.ok) throw new Error('HTTP '+resp.status)
       setEvents(prev=>prev.map(e=>e.id===id?{...e,acknowledged:true,ackUser:creds.user,ackNote:note}:e))
       showToast('Event acknowledged')
@@ -211,7 +226,7 @@ export default function App() {
       try {
         if (creds?.demoMode) { await new Promise(r=>setTimeout(r,60)); setEvents(prev=>prev.map(e=>e.id===id?{...e,acknowledged:true,ackUser:'demo_admin'}:e)); ok++ }
         else {
-          const resp=await fetch(creds.host+'/api/event/'+id+'/acknowledge',{method:'POST',headers:{...apiHeaders(),'Content-Type':'application/json'},body:JSON.stringify({ack:1})})
+          const resp=await fetch(apiUrl('/api/event/'+id+'/acknowledge'),{method:'POST',headers:{...apiHeaders(),'Content-Type':'application/json'},body:JSON.stringify({ack:1})})
           if(!resp.ok) throw new Error(); setEvents(prev=>prev.map(e=>e.id===id?{...e,acknowledged:true,ackUser:creds.user}:e)); ok++
         }
       } catch { fail++ }
