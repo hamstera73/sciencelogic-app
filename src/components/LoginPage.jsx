@@ -9,7 +9,7 @@ const ANIM = `
 `
 
 const AUTH_METHODS = [
-  { id: 'basic', label: 'Username & Password', icon: '🔑', desc: 'Basic Auth to EM7 API' },
+  { id: 'basic', label: 'Username & Password', icon: '🔑', desc: 'Basic Auth to EM7 API ' },
   { id: 'token', label: 'API Token',           icon: '🪙', desc: 'Personal API token from EM7 profile' },
   { id: 'oidc',  label: 'OAuth2 / OIDC',       icon: '🔐', desc: 'Azure AD, Okta, Google, Keycloak' },
   { id: 'saml',  label: 'SAML 2.0',            icon: '🏢', desc: 'Azure AD, ADFS, Okta SAML' },
