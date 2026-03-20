@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { C } from '../constants.js'
+import { C } from './constants.js'
 
 const ANIM = `
 @keyframes sl-spin { to { transform: rotate(360deg) } }
